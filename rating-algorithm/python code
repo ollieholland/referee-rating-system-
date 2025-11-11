@@ -1,0 +1,104 @@
+# ---------------------------------------------------------
+# rating_algorithm.py
+# Advanced Referee Rating System (Decimal output)
+# ---------------------------------------------------------
+
+import pandas as pd
+
+def calculate_ref_rating(decision_accuracy, foul_management, var_accuracy, game_flow):
+    """
+    Returns the referee rating for a single match, out of 10,
+    with decimal precision (e.g., 7.83)
+
+    Weighted model:
+      - Decision accuracy:   40%
+      - Foul management:     30%
+      - VAR handling:        15%
+      - Game flow control:   15%
+    """
+
+    rating = round(
+        (decision_accuracy * 0.40) +
+        (foul_management * 0.30) +
+        (var_accuracy * 0.15) +
+        (game_flow * 0.15),
+        2  # <-- rounds to decimal places (e.g., 7.83)
+    )
+
+    return rating
+
+
+def add_rating_to_dataset(df):
+    """
+    Applies the referee rating formula to a dataset.
+
+    The dataframe MUST contain these columns:
+      - decision_accuracy (0-10)
+      - foul_management (0-10)
+      - var_accuracy (0-10)
+      - game_flow (0-10)
+    """
+
+    df["rating"] = df.apply(
+        lambda row: calculate_ref_rating(
+            row["decision_accuracy"],
+            row["foul_management"],
+            row["var_accuracy"],
+            row["game_flow"]
+        ),
+        axis=1
+    )
+
+    return df
+
+
+def compute_aggregates(df):
+    """
+    Generates:
+      - last_5_avg: Last 5 matches average rating per referee
+      - season_avg: Season-long average per referee
+      - team_avg: Rating per team the referee handled
+      - leaderboard: Ranking of all referees across all leagues
+    """
+
+    # last 5 matches average
+    last_5_avg = (
+        df.sort_values(by=["match_date"], ascending=False)
+        .groupby("referee_name")
+        .head(5)
+        .groupby("referee_name")["rating"]
+        .mean()
+        .round(2)
+        .reset_index()
+        .rename(columns={"rating": "last_5_avg"})
+    )
+
+    # season average
+    season_avg = (
+        df.groupby("referee_name")["rating"]
+        .mean()
+        .round(2)
+        .reset_index()
+        .rename(columns={"rating": "season_avg"})
+    )
+
+    # avg rating when refereeing specific teams
+    team_avg = (
+        df.groupby(["referee_name", "team_name"])["rating"]
+        .mean()
+        .round(2)
+        .reset_index()
+        .rename(columns={"rating": "team_avg"})
+    )
+
+    # Ranking referees across all leagues
+    leaderboard = (
+        df.groupby(["referee_name", "league"])["rating"]
+        .mean()
+        .round(2)
+        .reset_index()
+        .sort_values(by="rating", ascending=False)
+    )
+
+    return last_5_avg, season_avg, team_avg, leaderboard
+
