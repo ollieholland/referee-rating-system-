@@ -1,0 +1,115 @@
+# referee_rating_v2_1.py
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.ensemble import RandomForestRegressor
+
+# -----------------------------------
+# STEP 1: Load and prepare data
+# -----------------------------------
+def load_data(file_path):
+    df = pd.read_csv(file_path)
+
+    default_values = {
+        'decision_accuracy': 0.85,
+        'var_overturns': 1,
+        'foul_management': 0.7,
+        'crowd_pressure': 0.5,
+        'match_importance': 0.5,
+        'attendance_pct': 0.7,
+        'rivalry_intensity': 0.4,
+        'final_ref_rating': 6.5
+    }
+
+    for col, val in default_values.items():
+        if col not in df.columns:
+            df[col] = val
+
+    return df
+
+
+# -----------------------------------
+# STEP 2: Train model
+# -----------------------------------
+def train_base_model(df):
+    features = [
+        'decision_accuracy', 'var_overturns', 'foul_management',
+        'crowd_pressure', 'match_importance', 'attendance_pct', 'rivalry_intensity'
+    ]
+    target = 'final_ref_rating'
+
+    X = df[features]
+    y = df[target]
+
+    model = RandomForestRegressor(n_estimators=200, random_state=42)
+    model.fit(X, y)
+
+    return model, features
+
+
+# -----------------------------------
+# STEP 3: Get and normalise weights
+# -----------------------------------
+def calculate_dynamic_weights(model, features):
+    importances = model.feature_importances_
+    weights = dict(zip(features, importances))
+    total = sum(weights.values())
+    weights = {k: v / total for k, v in weights.items()}
+    return weights
+
+
+# -----------------------------------
+# STEP 4: Calculate ratings
+# -----------------------------------
+def calculate_referee_rating(row, weights):
+    rating = 0
+    for feature, weight in weights.items():
+        rating += row[feature] * weight * 10
+    return round(rating, 2)
+
+
+# -----------------------------------
+# STEP 5: Visualize feature importance
+# -----------------------------------
+def plot_feature_importance(weights):
+    plt.figure(figsize=(8, 5))
+    features = list(weights.keys())
+    importance = list(weights.values())
+
+    plt.barh(features, importance)
+    plt.xlabel('Relative Importance')
+    plt.title('Feature Importance in Referee Rating Algorithm')
+    plt.gca().invert_yaxis()
+    plt.tight_layout()
+    plt.show()
+
+
+# -----------------------------------
+# STEP 6: Full pipeline
+# -----------------------------------
+def run_pipeline(file_path):
+    df = load_data(file_path)
+    model, features = train_base_model(df)
+    weights = calculate_dynamic_weights(model, features)
+
+    print("\nLearned feature weights:")
+    for k, v in weights.items():
+        print(f"{k}: {v:.2f}")
+
+    df['dynamic_ref_rating'] = df.apply(lambda row: calculate_referee_rating(row, weights), axis=1)
+    df['adjusted_rating'] = df['dynamic_ref_rating'].clip(1, 10)
+
+    # Show feature importance plot
+    plot_feature_importance(weights)
+
+    return df, weights
+
+
+# -----------------------------------
+# Example usage
+# -----------------------------------
+if __name__ == "__main__":
+    df, weights = run_pipeline("referee_data.csv")
+    print("\nSample dynamically calculated referee ratings:")
+    print(df[['decision_accuracy', 'var_overturns', 'match_importance', 'adjusted_rating']].head())
+
