@@ -1,121 +1,172 @@
 """
-Referee Rating Algorithm
-------------------------
-This module calculates a referee's performance rating for a given match,
-taking into account factors such as correct decisions, VAR interventions,
-foul management, and contextual match difficulty (MDR).
+rating_algorithm.py
+-------------------
+This module computes referee ratings using:
+1. Match Difficulty Score (MDS)
+2. Dual-Mode difficulty weighting (easy / medium / hard)
+3. Final referee rating (1–10 scale, with smart safeguards)
 
-The algorithm is designed for transparency and modularity, allowing
-football analysts and students to understand and extend the logic easily.
+Upcoming additions:
+- Consistency Rating (past 5 matches)
+- Error Severity Index (ESI) for weighted decision impact
 """
 
-from algorithm.match_difficulty import compute_match_difficulty
+import numpy as np
+import pandas as pd
 
+# ============================================================
+# 1. MATCH DIFFICULTY SCORE (MDS)
+# ============================================================
 
-def compute_referee_rating(match_stats, match_context):
+def compute_match_difficulty(row):
     """
-    Calculates a referee's final rating for a given match.
-
-    Parameters
-    ----------
-    match_stats : dict
-        Referee performance metrics from the match:
-        {
-            "correct_decisions": int,
-            "clear_errors": int,
-            "var_overturns": int,
-            "foul_management": float,   # quality of foul control (0–1)
-            "time_in_play": float       # minutes ball was in play (out of 90)
-        }
-
-    match_context : dict
-        Contextual difficulty factors for the match:
-        {
-            "importance": 0–1,
-            "rivalry": 0–1,
-            "attendance": 0–1,
-            "fouls": 0–1,
-            "var": 0–1,
-            "dissent": 0–1,
-            "weather": 0–1,
-            "fixture_history": 0–1
-        }
-
-    Returns
-    -------
-    dict
-        {
-            "base_rating": float,
-            "mdr_score": float,
-            "mdr_multiplier": float,
-            "final_rating": float
-        }
+    Creates a 0–1 difficulty score for each match.
+    Higher = more challenging environment for the referee.
     """
 
-    # --- Weighting system for referee performance ---
-    # Adjust these as your model becomes more data-driven.
     weights = {
-        "correct_decisions": 0.35,
-        "clear_errors": -0.25,
-        "var_overturns": -0.10,
-        "foul_management": 0.20,
-        "time_in_play": 0.10
+        'crowd_pressure': 0.20,
+        'attendance_pct': 0.15,
+        'rivalry_intensity': 0.20,
+        'match_importance': 0.25,
+        'var_overturns': 0.05,
+        'foul_management': 0.05,
+        'decision_accuracy': 0.10
     }
 
-    # --- Normalize and compute base rating (0–10 scale) ---
-    base_score = (
-        weights["correct_decisions"] * match_stats["correct_decisions"]
-        + weights["clear_errors"] * match_stats["clear_errors"]
-        + weights["var_overturns"] * match_stats["var_overturns"]
-        + weights["foul_management"] * match_stats["foul_management"]
-        + weights["time_in_play"] * (match_stats["time_in_play"] / 90)
-    )
+    score = sum(row[f] * w for f, w in weights.items())
+    return max(0.0, min(1.0, score))
 
-    # Scale and clamp base score to 1–10 range
-    base_rating = max(1.0, min(10.0, 5.0 + base_score * 10))
 
-    # --- Apply Match Difficulty Rating (MDR) ---
-    mdr = compute_match_difficulty(match_context)
+# ============================================================
+# 2. DIFFICULTY CATEGORY (EASY / MEDIUM / HARD)
+# ============================================================
 
-    final_rating = base_rating * mdr["mdr_multiplier"]
-    final_rating = max(1.0, min(10.0, final_rating))
+def difficulty_category(mds):
+    """
+    Assigns difficulty label based on the match difficulty score.
+    """
+    if mds < 0.45:
+        return "easy"
+    elif mds > 0.55:
+        return "hard"
+    else:
+        return "medium"
 
+
+# ============================================================
+# 3. WEIGHT SETS FOR DUAL-MODE SCORING
+# ============================================================
+
+WEIGHTS = {
+    "easy": {
+        'decision_accuracy': 0.50,
+        'foul_management': 0.20,
+        'var_overturns': 0.05,
+        'crowd_pressure': 0.05,
+        'match_importance': 0.05,
+        'attendance_pct': 0.05,
+        'rivalry_intensity': 0.10
+    },
+    "medium": {
+        'decision_accuracy': 0.35,
+        'foul_management': 0.25,
+        'var_overturns': 0.10,
+        'crowd_pressure': 0.10,
+        'match_importance': 0.10,
+        'attendance_pct': 0.05,
+        'rivalry_intensity': 0.05
+    },
+    "hard": {
+        'decision_accuracy': 0.25,
+        'foul_management': 0.25,
+        'var_overturns': 0.15,
+        'crowd_pressure': 0.15,
+        'match_importance': 0.10,
+        'attendance_pct': 0.05,
+        'rivalry_intensity': 0.05
+    }
+}
+
+
+# ============================================================
+# 4. FINAL RATING FUNCTION (with safeguarding for easy matches)
+# ============================================================
+
+def compute_final_rating(row):
+    """
+    Computes the final referee rating using dual-mode weighting.
+    Includes:
+    - Match difficulty calculation
+    - Difficulty mode selection
+    - Weighted performance score
+    - Minimum baseline score protection for 'easy' matches
+    """
+
+    # ---- Difficulty calculations ----
+    mds = compute_match_difficulty(row)
+    mode = difficulty_category(mds)
+    w = WEIGHTS[mode]
+
+    # ---- Weighted performance score ----
+    raw_rating = sum(row[f] * w[f] * 10 for f in w)  # scaled to 1–10 range
+
+    # ---- Prevent unfairly low scores in easy games ----
+    if mode == "easy":
+        raw_rating = max(raw_rating, 6.5)
+
+    # Return structured result
     return {
-        "base_rating": round(base_rating, 2),
-        "mdr_score": mdr["mdr_score"],
-        "mdr_multiplier": mdr["mdr_multiplier"],
-        "final_rating": round(final_rating, 2)
+        "mds": round(mds, 3),
+        "difficulty_mode": mode,
+        "final_rating": round(raw_rating, 2)
     }
 
 
-# --- Example usage ---
-if __name__ == "__main__":
-    # Example referee stats
-    match_stats_example = {
-        "correct_decisions": 0.88,  # 88% of calls correct
-        "clear_errors": 0.02,       # 2% clear errors
-        "var_overturns": 0.05,      # 5% overturned by VAR
-        "foul_management": 0.7,     # solid game management
-        "time_in_play": 82          # 82 minutes of active play
-    }
+# ============================================================
+# 5. APPLY ALGORITHM TO AN ENTIRE DATAFRAME
+# ============================================================
 
-    # Example match context (values between 0–1)
-    match_context_example = {
-        "importance": 0.8,       # important league game
-        "rivalry": 0.9,          # derby match
-        "attendance": 0.75,      # 75% stadium full
-        "fouls": 0.6,            # medium-high intensity
-        "var": 0.5,              # average VAR activity
-        "dissent": 0.4,          # mild dissent
-        "weather": 0.3,          # decent conditions
-        "fixture_history": 0.7   # historically fiery fixture
-    }
+def rate_dataframe(df):
+    """
+    Takes a referee dataset and adds:
+    - match difficulty score
+    - difficulty mode
+    - final rating
+    """
+    results = df.apply(lambda row: compute_final_rating(row), axis=1, result_type='expand')
+    df["mds"] = results["mds"]
+    df["difficulty_mode"] = results["difficulty_mode"]
+    df["final_rating"] = results["final_rating"]
+    return df
 
-    result = compute_referee_rating(match_stats_example, match_context_example)
 
-    print("---- Referee Rating Breakdown ----")
-    print(f"Base Rating: {result['base_rating']}")
-    print(f"MDR Score: {result['mdr_score']}")
-    print(f"MDR Multiplier: {result['mdr_multiplier']}")
-    print(f"Final Rating: {result['final_rating']}")
+# ============================================================
+# 6. PLACEHOLDERS FOR FUTURE FEATURES (to be implemented next)
+# ============================================================
+
+def compute_consistency_rating():
+    """
+    TODO (Oliver + ChatGPT Step D):
+    Based on last 5 matches:
+    - Reward consistent performance
+    - Penalize volatility
+    """
+    pass
+
+
+def compute_error_severity_index():
+    """
+    TODO (Oliver + ChatGPT Step E):
+    Weighted classification of:
+    - Minor Errors
+    - Moderate Errors
+    - Major Errors
+    - Critical Errors
+    """
+    pass
+
+
+# End of rating_algorithm.py
+
 
