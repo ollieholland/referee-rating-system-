@@ -1,48 +1,46 @@
-"""
-rating_algorithm.py
--------------------
-Full referee rating engine including:
-
-1. Match Difficulty Score (MDS)
-2. Dual-Mode Difficulty System (easy / medium / hard)
-3. Final Match Rating (1–10 scale)
-4. Error Severity Index (ESI) — minor / moderate / major errors
-5. Consistency Rating — rolling volatility over last 5 matches
-6. Form Rating — 5-game rolling average
-7. Season Average Rating — per referee
-
-Author: Oliver Holland
-"""
+# rating_algorithm.py
+# Full professional referee rating model with behaviour indicators,
+# difficulty scaling, consistency, form, and season averages.
 
 import numpy as np
 import pandas as pd
 
+
 # ============================================================
-# 1. MATCH DIFFICULTY SCORE (MDS)
+# 1. BEHAVIOUR DEFAULTS (added if missing from dataset)
+# ============================================================
+
+BEHAVIOUR_DEFAULTS = {
+    "FvX": 1.0,       # Fouls given vs expected
+    "YCPF": 0.20,     # Yellow cards per foul
+    "VARF": 0.10,     # VAR involvement frequency
+    "HBI": 0.10,      # Home-bias index
+    "CPR": 0.20,      # Crowd-pressure reactivity
+    "TTD": 0.40       # Decision time (0-1)
+}
+
+def ensure_behaviour_columns(df):
+    for col, val in BEHAVIOUR_DEFAULTS.items():
+        if col not in df.columns:
+            df[col] = val
+    return df
+
+
+# ============================================================
+# 2. MATCH DIFFICULTY SCORE (MDS)
 # ============================================================
 
 def compute_match_difficulty(row):
-    """
-    Produces a 0–1 score showing how hard a match was to referee.
-    """
+    mds = (
+        0.20 * row["crowd_pressure"] +
+        0.15 * row["attendance_pct"] +
+        0.20 * row["rivalry_intensity"] +
+        0.20 * row["match_importance"] +
+        0.10 * row["VARF"] +
+        0.10 * row["CPR"]
+    )
+    return max(0.0, min(1.0, mds))
 
-    weights = {
-        'crowd_pressure': 0.20,
-        'attendance_pct': 0.15,
-        'rivalry_intensity': 0.20,
-        'match_importance': 0.25,
-        'var_overturns': 0.05,
-        'foul_management': 0.05,
-        'decision_accuracy': 0.10
-    }
-
-    score = sum(row.get(f, 0) * w for f, w in weights.items())
-    return max(0.0, min(1.0, score))
-
-
-# ============================================================
-# 2. DIFFICULTY CATEGORY LABEL (EASY / MEDIUM / HARD)
-# ============================================================
 
 def difficulty_category(mds):
     if mds < 0.45:
@@ -54,211 +52,186 @@ def difficulty_category(mds):
 
 
 # ============================================================
-# 3. WEIGHT SETS FOR FINAL MATCH RATING
+# 3. BASE WEIGHTS (per difficulty mode)
 # ============================================================
 
-WEIGHTS = {
+BASE_WEIGHTS = {
     "easy": {
-        'decision_accuracy': 0.50,
-        'foul_management': 0.20,
-        'var_overturns': 0.05,
-        'crowd_pressure': 0.05,
-        'match_importance': 0.05,
-        'attendance_pct': 0.05,
-        'rivalry_intensity': 0.10
+        "decision_accuracy": 0.50,
+        "foul_management": 0.20,
+        "var_overturns": 0.05,
+        "crowd_pressure": 0.05,
+        "match_importance": 0.05,
+        "attendance_pct": 0.05,
+        "rivalry_intensity": 0.10
     },
     "medium": {
-        'decision_accuracy': 0.35,
-        'foul_management': 0.25,
-        'var_overturns': 0.10,
-        'crowd_pressure': 0.10,
-        'match_importance': 0.10,
-        'attendance_pct': 0.05,
-        'rivalry_intensity': 0.05
+        "decision_accuracy": 0.35,
+        "foul_management": 0.25,
+        "var_overturns": 0.10,
+        "crowd_pressure": 0.10,
+        "match_importance": 0.10,
+        "attendance_pct": 0.05,
+        "rivalry_intensity": 0.05
     },
     "hard": {
-        'decision_accuracy': 0.25,
-        'foul_management': 0.25,
-        'var_overturns': 0.15,
-        'crowd_pressure': 0.15,
-        'match_importance': 0.10,
-        'attendance_pct': 0.05,
-        'rivalry_intensity': 0.05
+        "decision_accuracy": 0.25,
+        "foul_management": 0.25,
+        "var_overturns": 0.15,
+        "crowd_pressure": 0.15,
+        "match_importance": 0.10,
+        "attendance_pct": 0.05,
+        "rivalry_intensity": 0.05
     }
 }
 
 
 # ============================================================
-# 4. ERROR SEVERITY INDEX (ESI)
+# 4. APPLY BEHAVIOURAL MODIFIERS TO WEIGHTS
 # ============================================================
 
-def compute_error_severity_index(row):
-    """
-    Applies realistic penalties for referee mistakes.
-    Negative values reduce the referee’s match rating.
-    """
+def apply_behaviour_modifiers(row, weights):
+    w = weights.copy()
 
-    weights = {
-        "minor_errors": -0.05,
-        "moderate_errors": -0.15,
-        "major_errors": -0.40
+    # Behaviour modifiers
+    modifier = {
+        "foul_management": row["FvX"],                  # strictness
+        "crowd_pressure": 1 + row["CPR"] * 0.2,         # pressure reaction
+        "var_overturns": 1 + row["VARF"] * 0.3,         # VAR dependence
+        "attendance_pct": 1 + row["HBI"] * 0.2,         # home bias
+        "decision_accuracy": 1 - row["TTD"] * 0.1       # hesitation penalty
     }
 
-    penalty = (
-        row.get("minor_errors", 0) * weights["minor_errors"] +
-        row.get("moderate_errors", 0) * weights["moderate_errors"] +
-        row.get("major_errors", 0) * weights["major_errors"]
-    )
+    # Apply modifiers
+    for f in w:
+        w[f] *= modifier.get(f, 1.0)
 
+    # Normalise back to sum=1
+    total = sum(w.values())
+    for f in w:
+        w[f] /= total
+
+    return w
+
+
+# ============================================================
+# 5. ERROR SEVERITY INDEX (ESI) WITH DIFFICULTY SCALING
+# ============================================================
+
+def compute_scaled_ESI(row):
+    base_penalty = (
+        row["minor_errors"] * -0.05 +
+        row["moderate_errors"] * -0.15 +
+        row["major_errors"] * -0.40
+    )
+    mds = compute_match_difficulty(row)
+    penalty = base_penalty * (0.5 + mds)
     return penalty
 
 
 # ============================================================
-# 5. FINAL MATCH RATING (CORE CALCULATION)
+# 6. BASE RATING CALCULATION
 # ============================================================
 
-def compute_final_rating(row, esi_penalty, consistency_bonus):
-    """
-    Produces a referee rating (1–10) using:
+def compute_base_rating(row, weights):
+    score = 0
+    for feature, w in weights.items():
+        value = row.get(feature, 0)
+        score += value * w * 10
+    return score
 
-    - Dual-mode difficulty weighting
-    - Error severity penalties
-    - Consistency bonuses
 
-    Includes fairness protection for easy matches.
-    """
+# ============================================================
+# 7. FINAL RATING
+# ============================================================
 
+def compute_final_rating(row):
     mds = compute_match_difficulty(row)
     mode = difficulty_category(mds)
-    w = WEIGHTS[mode]
 
-    # Base performance rating
-    base_rating = sum(row.get(f, 0) * w[f] * 10 for f in w)
+    base_w = BASE_WEIGHTS[mode]
+    adjusted_w = apply_behaviour_modifiers(row, base_w)
 
-    # Add penalties and bonuses
-    final_rating = base_rating + esi_penalty + consistency_bonus
+    base = compute_base_rating(row, adjusted_w)
+    esi_penalty = compute_scaled_ESI(row)
 
-    # Fairness floor for easy matches
-    if mode == "easy":
-        final_rating = max(final_rating, 6.5)
+    final = base + esi_penalty
+    final = max(1.0, min(10.0, round(final, 2)))
 
-    # Bound between 1 and 10
-    final_rating = max(1.0, min(10.0, final_rating))
-
-    return {
-        "mds": round(mds, 3),
-        "difficulty_mode": mode,
-        "final_rating": round(final_rating, 2)
-    }
+    return final, mds, mode
 
 
 # ============================================================
-# 6. CONSISTENCY RATING (VOLATILITY OVER LAST 5 MATCHES)
+# 8. CONSISTENCY BONUS
 # ============================================================
 
 def compute_consistency_bonus(df):
-    """
-    Rewards referees who perform stably over 5 matches.
-
-    Low volatility = bonus
-    High volatility = penalty
-    """
-
     bonuses = {}
+    for ref in df["referee"].unique():
+        ref_df = df[df["referee"] == ref].sort_values("match_id")
+        rolling_std = ref_df["final_rating"].rolling(5).std()
 
-    for referee in df['referee'].unique():
-        ref_df = df[df['referee'] == referee].sort_values("match_id")
-
-        rolling_std = ref_df['final_rating'].rolling(window=5).std()
-
-        for i, std_val in enumerate(rolling_std):
-            idx = ref_df.index[i]
-
-            if i < 4:
+        for idx, std in zip(ref_df.index, rolling_std):
+            if np.isnan(std):
                 bonuses[idx] = 0
-                continue
-
-            if std_val < 0.15:
+            elif std < 0.15:
                 bonuses[idx] = 0.20
-            elif std_val < 0.30:
+            elif std < 0.30:
                 bonuses[idx] = 0.10
-            elif std_val < 0.50:
+            elif std < 0.50:
                 bonuses[idx] = 0.00
             else:
                 bonuses[idx] = -0.15
-
     return bonuses
 
 
 # ============================================================
-# 7. 5-GAME FORM + SEASON AVERAGE
+# 9. FORM + SEASON AVERAGE
 # ============================================================
 
-def compute_form_and_season_averages(df):
-    form_dict = {}
-    season_dict = {}
+def compute_form_and_season(df):
+    form_map = {}
+    season_map = {}
 
-    for referee in df['referee'].unique():
-        ref_matches = df[df['referee'] == referee].sort_values("match_id")
+    for ref in df["referee"].unique():
+        matches = df[df["referee"] == ref].sort_values("match_id")
+        season_map[ref] = round(matches["final_rating"].mean(), 2)
 
-        # Season average
-        season_avg = ref_matches["final_rating"].mean()
-        season_dict[referee] = round(season_avg, 2)
+        rolling = matches["final_rating"].rolling(5).mean()
+        for idx, val in zip(matches.index, rolling):
+            form_map[idx] = round(val, 2) if not np.isnan(val) else None
 
-        # Rolling 5-game form
-        rolling_form = ref_matches["final_rating"].rolling(window=5).mean()
-
-        for idx, val in zip(ref_matches.index, rolling_form):
-            form_dict[idx] = round(val, 2) if not np.isnan(val) else None
-
-    return form_dict, season_dict
+    return form_map, season_map
 
 
 # ============================================================
-# 8. MAIN PIPELINE TO RATE A FULL DATAFRAME
+# 10. MASTER FUNCTION
 # ============================================================
 
 def rate_dataframe(df):
-    """
-    Runs the full referee rating model.
 
-    Produces:
-    - Match difficulty score
-    - Difficulty mode
-    - Final match rating
-    - Consistency rating
-    - 5-game form
-    - Season average
-    """
+    df = ensure_behaviour_columns(df)
 
-    # STEP 1 — Base ratings (without consistency bonus)
-    base_results = []
+    # STEP 1 — apply base rating
+    finals, mds_list, mode_list = [], [], []
     for _, row in df.iterrows():
-        esi = compute_error_severity_index(row)
-        result = compute_final_rating(row, esi_penalty=esi, consistency_bonus=0)
-        base_results.append(result["final_rating"])
+        final, mds, mode = compute_final_rating(row)
+        finals.append(final)
+        mds_list.append(mds)
+        mode_list.append(mode)
 
-    df["final_rating"] = base_results
+    df["final_rating"] = finals
+    df["mds"] = mds_list
+    df["difficulty_mode"] = mode_list
 
-    # STEP 2 — Consistency bonus
-    consistency_bonus = compute_consistency_bonus(df)
+    # STEP 2 — consistency bonuses
+    bonuses = compute_consistency_bonus(df)
+    df["final_rating"] += df.index.map(bonuses)
 
-    # STEP 3 — Recalculate final results with consistency
-    final_results = []
-    for idx, row in df.iterrows():
-        esi = compute_error_severity_index(row)
-        bonus = consistency_bonus[idx]
-        result = compute_final_rating(row, esi_penalty=esi, consistency_bonus=bonus)
-        final_results.append(result)
-
-    df["mds"] = [r["mds"] for r in final_results]
-    df["difficulty_mode"] = [r["difficulty_mode"] for r in final_results]
-    df["final_rating"] = [r["final_rating"] for r in final_results]
-
-    # STEP 4 — 5-game form + season average
-    form_dict, season_dict = compute_form_and_season_averages(df)
-
-    df["form_5_games"] = df.index.map(form_dict)
-    df["season_average"] = df["referee"].map(season_dict)
+    # STEP 3 — season + form
+    form_map, season_map = compute_form_and_season(df)
+    df["form_5_games"] = df.index.map(form_map)
+    df["season_average"] = df["referee"].map(season_map)
 
     return df
+
